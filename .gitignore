@@ -1,0 +1,7 @@
+*.jpg
+*.png
+*.duckdb
+*.wal
+/__pycache__
+/.idea
+/.mypy_cache
