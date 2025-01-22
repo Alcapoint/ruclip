@@ -4,7 +4,6 @@ import duckdb
 import os
 import shutil
 import torch
-import numpy as np
 from PIL import Image
 import clip
 
@@ -16,9 +15,12 @@ conn.execute("""
 CREATE TABLE IF NOT EXISTS photos (
     id INTEGER,
     filename TEXT,
-    vector BLOB
+    vector DOUBLE[]
 )
 """)
+
+conn.execute("INSTALL 'vss'")
+conn.execute("LOAD 'vss'")
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model, preprocess = clip.load("ViT-B/32", device=device)
@@ -36,12 +38,13 @@ async def process_image(file: UploadFile = File(...)):
     image = preprocess(Image.open(file_path).convert("RGB")).unsqueeze(0).to(device)
     with torch.no_grad():
         image_features = model.encode_image(image).float().cpu().numpy()
+        image_features_list = image_features[0].tolist()
 
     result = conn.execute("SELECT MAX(id) FROM photos").fetchone()
     new_id = (result[0] or 0) + 1
 
     conn.execute("INSERT INTO photos (id, filename, vector) VALUES (?, ?, ?)",
-                 (new_id, file.filename, image_features.tobytes()))
+                 (new_id, file.filename, image_features_list))
 
     return JSONResponse({"message": "Image uploaded", "id": new_id})
 
@@ -56,36 +59,20 @@ async def search_images(
 ):
     text_tokens = clip.tokenize([q]).to(device)
     with torch.no_grad():
-        text_features = model.encode_text(text_tokens).float()
-        text_features /= text_features.norm(dim=-1, keepdim=True)
+        text_features = model.encode_text(text_tokens).double().cpu().numpy()
 
-    photos = conn.execute("SELECT id, filename, vector FROM photos").fetchall()
+    offset = (page - 1) * limit
+    query = f"""
+        SELECT id, filename,
+               list_cosine_similarity(vector, ?) AS similarity
+        FROM photos
+        WHERE list_cosine_similarity(vector, ?) >= ?
+        ORDER BY similarity {sort}
+        LIMIT ? OFFSET ?
+    """
+    results = conn.execute(query, (text_features[0], text_features[0], sim, limit, offset)).fetchall()
 
-    image_vectors = []
-    photo_info = []
-    for photo_id, filename, image_vector in photos:
-        vector = np.frombuffer(image_vector, dtype=np.float32)
-        image_vectors.append(vector)
-        photo_info.append((photo_id, filename))
-
-    image_features = torch.tensor(np.stack(image_vectors)).to(device)
-    image_features /= image_features.norm(dim=-1, keepdim=True)
-
-    similarities = image_features @ text_features.T
-    similarities = similarities.squeeze(1).cpu().numpy()
-
-    results = [
-        {"img": photo_info[i][1], "similarity": float(similarities[i])}
-        for i in range(len(photo_info))
-        if similarities[i] >= sim
-    ]
-
-    results = sorted(results, key=lambda x: x["similarity"], reverse=(sort == "DESC"))
-    start_index = (page - 1) * limit
-    end_index = start_index + limit
-    paginated_results = results[start_index:end_index]
-
-    return JSONResponse({"results": paginated_results})
+    return JSONResponse([{"img": r[1], "similarity": r[2]} for r in results])
 
 
 @app.post("/image/imageSearch")
@@ -105,31 +92,17 @@ async def search_by_image(
 
     image = preprocess(Image.open(file_path).convert("RGB")).unsqueeze(0).to(device)
     with torch.no_grad():
-        query_features = model.encode_image(image).float()
-        query_features /= query_features.norm(dim=-1, keepdim=True)
+        query_features = model.encode_image(image).float().cpu().numpy()
 
-    photos = conn.execute("SELECT id, filename, vector FROM photos").fetchall()
+    offset = (page - 1) * limit
+    query = f"""
+        SELECT id, filename,
+               list_cosine_similarity(vector, ?) AS similarity
+        FROM photos
+        WHERE list_cosine_similarity(vector, ?) >= ?
+        ORDER BY similarity {sort}
+        LIMIT ? OFFSET ?
+    """
+    results = conn.execute(query, (query_features[0], query_features[0], sim, limit, offset)).fetchall()
 
-    image_vectors = []
-    photo_info = []
-    for photo_id, filename, image_vector in photos:
-        vector = np.frombuffer(image_vector, dtype=np.float32)
-        image_vectors.append(vector)
-        photo_info.append((photo_id, filename))
-
-    image_features = torch.tensor(np.stack(image_vectors)).to(device)
-    image_features /= image_features.norm(dim=-1, keepdim=True)
-    similarities = image_features @ query_features.T
-    similarities = similarities.squeeze(1).cpu().numpy()
-
-    results = [
-        {"img": photo_info[i][1], "similarity": float(similarities[i])}
-        for i in range(len(photo_info))
-        if similarities[i] >= sim
-    ]
-    results = sorted(results, key=lambda x: x["similarity"], reverse=(sort == "DESC"))
-    start_index = (page - 1) * limit
-    end_index = start_index + limit
-    paginated_results = results[start_index:end_index]
-
-    return JSONResponse({"results": paginated_results})
+    return JSONResponse([{"img": r[1], "similarity": r[2]} for r in results])
