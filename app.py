@@ -1,11 +1,11 @@
 from fastapi import FastAPI, File, UploadFile, Query
 from fastapi.responses import JSONResponse
 import duckdb
-import os
-import shutil
 import torch
 from PIL import Image
+import io
 import clip
+# flake8: noqa: E501
 
 app = FastAPI()
 
@@ -15,6 +15,7 @@ conn.execute("""
 CREATE TABLE IF NOT EXISTS photos (
     id INTEGER,
     filename TEXT,
+    image_data BLOB,
     vector DOUBLE[]
 )
 """)
@@ -25,17 +26,12 @@ conn.execute("LOAD 'vss'")
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model, preprocess = clip.load("ViT-B/32", device=device)
 
-uploads_dir = "uploads"
-os.makedirs(uploads_dir, exist_ok=True)
-
 
 @app.post("/image/process")
 async def process_image(file: UploadFile = File(...)):
-    file_path = os.path.join(uploads_dir, file.filename)
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    file_data = await file.read()
 
-    image = preprocess(Image.open(file_path).convert("RGB")).unsqueeze(0).to(device)
+    image = preprocess(Image.open(io.BytesIO(file_data)).convert("RGB")).unsqueeze(0).to(device)
     with torch.no_grad():
         image_features = model.encode_image(image).float().cpu().numpy()
         image_features_list = image_features[0].tolist()
@@ -43,8 +39,8 @@ async def process_image(file: UploadFile = File(...)):
     result = conn.execute("SELECT MAX(id) FROM photos").fetchone()
     new_id = (result[0] or 0) + 1
 
-    conn.execute("INSERT INTO photos (id, filename, vector) VALUES (?, ?, ?)",
-                 (new_id, file.filename, image_features_list))
+    conn.execute("INSERT INTO photos (id, filename, image_data, vector) VALUES (?, ?, ?, ?)",
+                 (new_id, file.filename, file_data, image_features_list))
 
     return JSONResponse({"message": "Image uploaded", "id": new_id})
 
@@ -83,14 +79,9 @@ async def search_by_image(
     limit: int = Query(10),
     page: int = Query(1)
 ):
-    uploads_dir = "uploads/temp"
-    os.makedirs(uploads_dir, exist_ok=True)
+    file_data = await file.read()
 
-    file_path = os.path.join(uploads_dir, file.filename)
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-
-    image = preprocess(Image.open(file_path).convert("RGB")).unsqueeze(0).to(device)
+    image = preprocess(Image.open(io.BytesIO(file_data)).convert("RGB")).unsqueeze(0).to(device)
     with torch.no_grad():
         query_features = model.encode_image(image).float().cpu().numpy()
 
