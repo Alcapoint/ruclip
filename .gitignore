@@ -6,3 +6,4 @@
 /.idea
 /.mypy_cache
 /templates
+.DS_Store
