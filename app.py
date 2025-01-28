@@ -38,11 +38,12 @@ async def process_image(file: UploadFile = File(...)):
         image_features_list = image_features[0].tolist()
 
     with duckdb.connect(db_path) as conn:
-        new_id, = conn.execute("SELECT nextval('seq_photoid')").fetchone()
-        conn.execute("INSERT INTO photos (id, filename, image_data, vector) VALUES (?, ?, ?, ?)",
-                     (new_id, file.filename, file_data, image_features_list))
+        conn.execute("""
+            INSERT INTO photos (id, filename, image_data, vector)
+            VALUES (nextval('seq_photoid'), ?, ?, ?)
+        """, (file.filename, file_data, image_features_list))
 
-    return JSONResponse({"message": "Image uploaded", "id": new_id})
+    return JSONResponse({"message": "Image uploaded"})
 
 
 def validate_params(sim, limit, page, sort):
